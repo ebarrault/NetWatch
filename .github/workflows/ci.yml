@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+      - run: npx prisma generate
+      - name: Tests (moteur d'alertes, analyse ping, SNMP)
+        run: npm run test:cov
+      - run: npm run build
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install
+      - run: npm run build
+
+  # Démarre toute la pile + les équipements simulés et vérifie qu'ils sont bien supervisés
+  integration:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Démarrage du labo
+        run: POLL_INTERVAL_SECONDS=5 docker compose up -d --build
+
+      - name: Attente de l'API
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -sf -X POST localhost:3002/api/auth/login -H 'Content-Type: application/json' \
+                 -d '{"email":"admin@supervision.local","password":"Admin123!"}' -o login.json; then
+              jq -er .accessToken login.json > /dev/null && echo "API prête après $((i * 3)) s" && exit 0
+            fi
+            sleep 3
+          done
+          echo "L'API n'a pas démarré en 3 minutes" >&2
+          exit 1
+
+      - name: Équipements supervisés (SNMP + équipement injoignable)
+        run: |
+          set -euo pipefail
+          TOKEN=$(jq -r .accessToken login.json)
+          # Attend que les contrôles aient tourné (cycle de 5 s, DOWN après 2 échecs)
+          for i in $(seq 1 30); do
+            curl -sf localhost:3002/api/devices -H "Authorization: Bearer $TOKEN" > devices.json
+            up=$(jq '[.[] | select(.name=="R-SIEGE" and .state=="UP" and .sysName=="R-SIEGE")] | length' devices.json)
+            down=$(jq '[.[] | select(.name=="BORNE-WIFI-HALL" and .state=="DOWN")] | length' devices.json)
+            if [ "$up" = 1 ] && [ "$down" = 1 ]; then
+              jq '.[] | {name, state, lastLatencyMs, sysName}' devices.json
+              exit 0
+            fi
+            sleep 3
+          done
+          jq '.[] | {name, state, lastLatencyMs, sysName}' devices.json
+          echo "États attendus non atteints" >&2
+          exit 1
+
+      - name: Scénario de panne
+        run: |
+          set -euo pipefail
+          TOKEN=$(jq -r .accessToken login.json)
+          docker compose stop sim-routeur-agence
+          for i in $(seq 1 30); do
+            curl -sf "localhost:3002/api/alerts?status=open" -H "Authorization: Bearer $TOKEN" > alerts.json
+            if [ "$(jq '[.[] | select(.device.name=="R-AGENCE" and .type=="DEVICE_DOWN")] | length' alerts.json)" = 1 ]; then
+              jq '.[] | {device: .device.name, type, message}' alerts.json
+              exit 0
+            fi
+            sleep 3
+          done
+          jq '.[] | {device: .device.name, type, message}' alerts.json
+          echo "Alerte DEVICE_DOWN non ouverte pour R-AGENCE" >&2
+          exit 1
+
+      - name: Journaux en cas d'échec
+        if: failure()
+        run: docker compose logs backend

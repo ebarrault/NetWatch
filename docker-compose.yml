@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: supervision
+      POSTGRES_PASSWORD: supervision
+      POSTGRES_DB: supervision
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supervision"]
+      interval: 5s
+      retries: 10
+    ports:
+      - "5434:5432"
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://supervision:supervision@db:5432/supervision?schema=public
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-a-changer}
+      PORT: 3002
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
+      FAILURES_BEFORE_DOWN: 2
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      SEED: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3002:3002"
+    networks: [default, labo]
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports:
+      - "8082:80"
+
+  # ---------- Équipements simulés du labo ----------
+  sim-routeur-siege:
+    build: ./lab/snmp-device
+    hostname: R-SIEGE
+    networks: [labo]
+  sim-switch-core:
+    build: ./lab/snmp-device
+    hostname: SW-CORE-SIEGE
+    networks: [labo]
+  sim-serveur-web:
+    build: ./lab/snmp-device
+    hostname: SRV-WEB
+    cap_add: [NET_ADMIN] # nécessaire au scénario « latence » (tc netem)
+    networks: [labo]
+  sim-routeur-agence:
+    build: ./lab/snmp-device
+    hostname: R-AGENCE
+    networks: [labo]
+  # Répond au ping mais n'a pas d'agent SNMP
+  sim-imprimante:
+    image: alpine:3.20
+    command: ["sleep", "infinity"]
+    networks: [labo]
+
+networks:
+  labo:
+
+volumes:
+  db-data:

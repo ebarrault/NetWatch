@@ -1,0 +1,106 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DeviceType {
+  ROUTER
+  SWITCH
+  FIREWALL
+  SERVER
+  ACCESS_POINT
+  PRINTER
+  OTHER
+}
+
+enum DeviceState {
+  UNKNOWN
+  UP
+  DEGRADED
+  DOWN
+}
+
+enum AlertType {
+  DEVICE_DOWN
+  HIGH_LATENCY
+  SNMP_UNREACHABLE
+  INTERFACE_DOWN
+  REBOOT
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model User {
+  id           Int    @id @default(autoincrement())
+  email        String @unique
+  name         String
+  passwordHash String
+}
+
+model Device {
+  id                  Int           @id @default(autoincrement())
+  name                String        @unique
+  host                String        // IP ou nom DNS
+  type                DeviceType    @default(OTHER)
+  site                String?
+  enabled             Boolean       @default(true)
+
+  snmpEnabled         Boolean       @default(false)
+  snmpCommunity       String        @default("public")
+  snmpPort            Int           @default(161)
+  latencyThresholdMs  Int           @default(200)
+
+  // État courant (mis à jour à chaque contrôle)
+  state               DeviceState   @default(UNKNOWN)
+  consecutiveFailures Int           @default(0)
+  lastCheckAt         DateTime?
+  lastChangeAt        DateTime?
+  lastLatencyMs       Float?
+  sysName             String?
+  sysDescr            String?
+  uptimeSeconds       Int?
+  interfaces          Json?
+
+  createdAt           DateTime      @default(now())
+  checks              CheckResult[]
+  alerts              Alert[]
+}
+
+model CheckResult {
+  id            Int      @id @default(autoincrement())
+  deviceId      Int
+  device        Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+  reachable     Boolean
+  latencyMs     Float?
+  snmpOk        Boolean?
+  uptimeSeconds Int?
+  ifUp          Int?
+  ifDown        Int?
+
+  @@index([deviceId, createdAt])
+}
+
+model Alert {
+  id             Int       @id @default(autoincrement())
+  deviceId       Int
+  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  type           AlertType
+  severity       Severity
+  message        String
+  startedAt      DateTime  @default(now())
+  resolvedAt     DateTime?
+  acknowledgedAt DateTime?
+  acknowledgedBy String?
+
+  @@index([deviceId, resolvedAt])
+  @@index([resolvedAt])
+}
